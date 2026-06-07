@@ -4,17 +4,12 @@ chrome.runtime.onInstalled.addListener((details) => {
     console.log('OmniChat AutoResponder installed:', details.reason);
     
     if (details.reason === 'install') {
+        // Seed only the on/off flag. The full config lives in content.js (single
+        // source of truth) and is persisted there on first change — duplicating a
+        // partial copy here just drifts out of sync.
         chrome.storage.local.set({
             autoResponseEnabled: true,
-            processedAppeals: [],
-            config: {
-                responseDelay: 2000,
-                clickDelay: 500,
-                checkInterval: 2000,  // Check for new appeals every 2 seconds
-                cooldownPeriod: 7200000,
-                templateText: 'Запрос принят в работу',
-                templateTitle: '1.1 Приветствие'
-            }
+            processedAppeals: []
         });
     }
 });
