@@ -33,7 +33,7 @@ Chrome-расширение (Manifest V3), которое автоматичес
 
 ## 3. Манифест (`manifest.json`)
 
-- `manifest_version: 3`, версия расширения **5.0.0**.
+- `manifest_version: 3`, версия расширения **5.1.0**.
 - **Permissions:** `activeTab`, `storage`, `tabs`.
 - **Host permissions:** `*://omnichat.rt.ru/*` и `*://*.omnichat.rt.ru/*`.
 - **Content script** `content.js` внедряется на эти хосты при `document_idle`,
