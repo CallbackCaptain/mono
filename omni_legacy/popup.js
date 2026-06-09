@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OmniChat AutoResponder",
-  "version": "5.2.0",
+  "version": "5.0.0",
   "description": "Автоматический ответ на обращения в OmniChat",
   "permissions": [
     "activeTab",
