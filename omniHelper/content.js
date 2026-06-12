@@ -1,4 +1,4 @@
-// ===== OMNICHAT AUTO-RESPONDER v5.2 =====
+// ===== OMNICHAT AUTO-RESPONDER v5.3 =====
 // Simplified and reliable auto-response system
 
 // All OmniChat-specific selectors live here — the single point to update on a redesign.
@@ -44,6 +44,12 @@ class OmniChatAutoResponder {
         this.failureCounts = new Map(); // appealId → consecutive send failures
         this.lastHumanKeyTime = 0;      // timestamp of last trusted keystroke (operator typing)
 
+        // Loop guards — a ticket must never be worked in an endless cycle
+        this.lastBadgeTimer = new Map();     // client name → badge timer seen on the previous scan
+        this.reappealTimes = new Map();      // client name → timestamps of queued re-appeals
+        this.lastTemplateSentAt = new Map(); // `${name}::${templateText}` → last confirmed send
+        this.extraTimeCounts = new Map();    // appealId → extra-time sends in the current low-timer cycle
+
         // Configuration
         this.config = {
             responseDelay: 2000,
@@ -59,14 +65,18 @@ class OmniChatAutoResponder {
             extraTimeRepeatInterval: 3 * 60 * 1000,  // repeat every 3 min while timer < threshold
             maxSendRetries: 3,         // retry a greeting this many times before giving up
             operatorIdleMs: 8000,      // treat operator as "typing" within this window after a keystroke
-            sendVerifyTimeout: 2000    // wait up to this long to confirm a message actually appeared
+            sendVerifyTimeout: 2000,   // wait up to this long to confirm a message actually appeared
+            reappealCooldown: 15 * 60 * 1000,   // min pause between re-appeal greetings per client
+            maxReappeals: 2,           // max re-appeals per client within cooldownPeriod
+            templateRepeatGuard: 5 * 60 * 1000, // same template to the same client no more often than this
+            extraTimeMaxRepeats: 5     // max extra-time sends while the timer stays below threshold
         };
 
         this.init();
     }
 
     init() {
-        console.log('🚀 OmniChat AutoResponder v5.2');
+        console.log('🚀 OmniChat AutoResponder v5.3');
         this.loadState();
         this.injectInterceptor();
         this.setupObserver();
@@ -156,19 +166,40 @@ class OmniChatAutoResponder {
         const appeals = this.findAppealsInSidebar();
 
         appeals.forEach(appeal => {
+            // A re-appeal is a *transition* of the badge timer into the ≤60s zone,
+            // not the zone itself: the timestamp refresh below re-arms the elapsed
+            // check every 2 minutes, so without an edge trigger a timer that simply
+            // stays low re-greeted the same client in an endless 2-minute cycle.
+            const timer = this.getBadgeTimer(appeal.element);
+            const prevTimer = this.lastBadgeTimer.get(appeal.name);
+            if (timer !== null) this.lastBadgeTimer.set(appeal.name, timer);
+
             if (this.shouldProcess(appeal.id)) {
                 this.addToQueue(appeal);
             } else if (appeal.isNameBased && this.processedAppeals.has(appeal.id)) {
                 // Повторное обращение от того же клиента
                 const processedAt = this.processedAppeals.get(appeal.id);
                 const elapsed = Date.now() - processedAt;
-                const timer = this.getBadgeTimer(appeal.element);
 
                 // 2+ минуты с обработки И badge таймер ≤ 60 сек (свежее обращение)
                 if (elapsed > 2 * 60 * 1000 && timer !== null && timer <= 60) {
                     // Skip if a re-appeal for this client is already queued
                     const alreadyQueued = this.appealQueue.some(a => a.originalId === appeal.id);
                     if (alreadyQueued) return;
+
+                    // Edge trigger: fire only when the timer just dropped into the
+                    // zone (undefined = no earlier observation, e.g. after reload).
+                    if (prevTimer !== undefined && prevTimer <= 60) return;
+
+                    // Frequency cap: genuine re-appeals are rare. If they come in a
+                    // cycle, something upstream is wrong — stop rather than spam.
+                    const now = Date.now();
+                    const recent = (this.reappealTimes.get(appeal.name) || [])
+                        .filter(t => now - t < this.config.cooldownPeriod);
+                    if (recent.length >= this.config.maxReappeals) return;
+                    if (recent.length && now - recent[recent.length - 1] < this.config.reappealCooldown) return;
+                    recent.push(now);
+                    this.reappealTimes.set(appeal.name, recent);
 
                     const reappealId = `${appeal.id}_re_${Date.now()}`;
                     console.log('🔄 Re-appeal detected:', appeal.name, `(timer: ${timer}s)`);
@@ -181,6 +212,8 @@ class OmniChatAutoResponder {
                     // Prevent extra-time from also firing for this appeal
                     this.extraTimeSent.set(appeal.id, Date.now());
                     this.saveExtraTimeSent();
+                    // New conversation cycle — refresh the extra-time budget
+                    this.extraTimeCounts.delete(appeal.id);
                 }
             }
         });
@@ -196,7 +229,11 @@ class OmniChatAutoResponder {
             const appealData = this.extractAppealData(element);
             if (!appealData) return;
             const timer = this.getBadgeTimer(element);
-            if (timer === null || timer > this.config.extraTimeThreshold) return;
+            if (timer === null || timer > this.config.extraTimeThreshold) {
+                // Timer left the red zone (new SLA cycle) — refresh the repeat budget
+                this.extraTimeCounts.delete(appealData.id);
+                return;
+            }
             if (!this.processedAppeals.has(appealData.id)) return;
 
             const processedAt = this.processedAppeals.get(appealData.id);
@@ -219,6 +256,17 @@ class OmniChatAutoResponder {
             const lastSent = this.extraTimeSent.get(appealData.id);
             if (lastSent && (now - lastSent) < this.config.extraTimeRepeatInterval) return;
 
+            // Hard cap per low-timer cycle: a timer stuck below the threshold
+            // (e.g. an expired appeal sitting at 0) must not be messaged forever.
+            const repeats = this.extraTimeCounts.get(appealData.id) || 0;
+            if (repeats >= this.config.extraTimeMaxRepeats) {
+                if (repeats === this.config.extraTimeMaxRepeats) {
+                    console.log('🛑 Extra-time repeat limit reached:', appealData.name);
+                    this.extraTimeCounts.set(appealData.id, repeats + 1);
+                }
+                return;
+            }
+
             console.log('⏰ Extra-time needed:', appealData.name, `(timer: ${timer}s, repeat: ${lastSent ? 'yes' : 'first'})`);
             const extraTimeId = `${appealData.id}_extraTime_${now}`;
             this.appealQueue.push({
@@ -229,6 +277,7 @@ class OmniChatAutoResponder {
                 addedAt: now
             });
             this.extraTimeSent.set(appealData.id, now);
+            this.extraTimeCounts.set(appealData.id, repeats + 1);
             this.saveExtraTimeSent();
             if (!this.isProcessing) {
                 this.processQueue();
@@ -385,6 +434,8 @@ class OmniChatAutoResponder {
                     await this.sendTemplate(appeal, this.config.templateTitle, this.config.templateText);
                     this.saveProcessedAppeal(appeal.id);
                     this.failureCounts.delete(appeal.id);
+                    // A fresh greeting starts a new cycle — reset the extra-time budget
+                    this.extraTimeCounts.delete(appeal.originalId || appeal.id);
                     console.log('✅ Processed:', appeal.id);
                 }
             } catch (error) {
@@ -451,6 +502,21 @@ class OmniChatAutoResponder {
     }
 
     async sendTemplate(appeal, templateTitle, templateText) {
+        // Last-resort loop brake: the same template never goes to the same client
+        // twice within templateRepeatGuard, no matter which detection path asked
+        // for it. The network mapping can mint a fresh id for an already-greeted
+        // chat (e.g. message ids parsed from /chat responses), and every new id
+        // passes shouldProcess — this is the one gate id churn can't get around.
+        // Slot 2+ is exempt: simultaneous appeals under one name are different
+        // chats, and slots only exist for name-based ids, which don't churn.
+        if (appeal.type !== 'extraTime' && appeal.name && (appeal.slotIndex || 1) === 1) {
+            const lastSent = this.lastTemplateSentAt.get(`${appeal.name}::${templateText}`) || 0;
+            if (Date.now() - lastSent < this.config.templateRepeatGuard) {
+                console.log('⚠️ Same template sent to this client recently, skipping:', appeal.id);
+                return;
+            }
+        }
+
         // Flush any text in the current chat input before switching
         await this.flushCurrentInput();
 
@@ -592,6 +658,10 @@ class OmniChatAutoResponder {
             this.clearInput();
             throw new Error('Send not confirmed');
         }
+
+        if (appeal.name) {
+            this.lastTemplateSentAt.set(`${appeal.name}::${templateText}`, Date.now());
+        }
     }
 
     // Confirmed sent if EITHER the text shows up among chat messages, OR the text we
@@ -704,57 +774,9 @@ class OmniChatAutoResponder {
     // ===== NETWORK INTERCEPTOR =====
 
     injectInterceptor() {
-        const script = document.createElement('script');
-        script.textContent = `
-            (function() {
-                const originalFetch = window.fetch;
-                window.fetch = async function(...args) {
-                    const [url] = args;
-                    const urlStr = typeof url === 'string' ? url : url?.url || '';
-
-                    // Catch appealId from URL params
-                    if (urlStr.includes('appealId=')) {
-                        const match = urlStr.match(/appealId=(\\d+)/);
-                        if (match) {
-                            window.postMessage({
-                                type: 'omni-appeal-detected',
-                                appealId: match[1]
-                            }, '*');
-                        }
-                    }
-
-                    // Intercept response to extract appealId + client name mapping
-                    const response = await originalFetch.apply(this, args);
-                    try {
-                        if (urlStr.includes('/appeal') || urlStr.includes('/chat')) {
-                            const clone = response.clone();
-                            clone.json().then(data => {
-                                const appeals = Array.isArray(data) ? data :
-                                                data?.data ? (Array.isArray(data.data) ? data.data : [data.data]) :
-                                                data?.result ? (Array.isArray(data.result) ? data.result : [data.result]) :
-                                                [data];
-                                appeals.forEach(item => {
-                                    const id = item?.appealId || item?.id || item?.appeal_id;
-                                    const name = item?.clientName || item?.client_name ||
-                                                 item?.customer?.name || item?.name;
-                                    if (id && name) {
-                                        window.postMessage({
-                                            type: 'omni-appeal-mapping',
-                                            appealId: String(id),
-                                            clientName: name.trim()
-                                        }, '*');
-                                    }
-                                });
-                            }).catch(() => {});
-                        }
-                    } catch(e) {}
-                    return response;
-                };
-            })();
-        `;
-        document.head.appendChild(script);
-        script.remove();
-
+        // Fetch interception lives in interceptor.js, injected by the browser
+        // into the page's MAIN world (manifest.json) — page CSP can't block it.
+        // Here we only listen for its postMessage events.
         window.addEventListener('message', (event) => {
             if (event.data?.type === 'omni-appeal-detected') {
                 setTimeout(() => this.checkForAppeals(), 1000);
@@ -883,6 +905,10 @@ class OmniChatAutoResponder {
                 this.processedAppeals.clear();
                 this.extraTimeSent.clear();
                 this.failureCounts.clear();
+                this.extraTimeCounts.clear();
+                this.reappealTimes.clear();
+                this.lastTemplateSentAt.clear();
+                this.lastBadgeTimer.clear();
                 this.chromeSafeRemove(['processedAppeals', 'extraTimeSent']);
                 return 'History cleared';
             },
@@ -915,7 +941,7 @@ class OmniChatAutoResponder {
 
             help: () => {
                 console.log(`
-🤖 OmniChat AutoResponder v5.2
+🤖 OmniChat AutoResponder v5.3
 
 STATUS:
   omniResponder.getStats()     - Current status
@@ -957,18 +983,26 @@ try {
         }
 
         switch (request.action) {
-            case 'getStats':
+            case 'getStats': {
+                const todayStart = new Date().setHours(0, 0, 0, 0);
+                let processedToday = 0;
+                responder.processedAppeals.forEach(ts => {
+                    if (ts >= todayStart) processedToday++;
+                });
                 sendResponse({
                     success: true,
                     stats: {
                         autoResponseEnabled: responder.autoResponseEnabled,
                         queueLength: responder.appealQueue.length,
                         processedAppeals: responder.processedAppeals.size,
+                        processedToday,
+                        extraTimeSent: responder.extraTimeSent.size,
                         isProcessing: responder.isProcessing,
                         currentUrl: window.location.href
                     }
                 });
                 break;
+            }
 
             case 'toggleAutoResponse':
                 responder.toggleAutoResponse();
@@ -1000,6 +1034,10 @@ try {
                 responder.processedAppeals.clear();
                 responder.extraTimeSent.clear();
                 responder.failureCounts.clear();
+                responder.extraTimeCounts.clear();
+                responder.reappealTimes.clear();
+                responder.lastTemplateSentAt.clear();
+                responder.lastBadgeTimer.clear();
                 responder.chromeSafeRemove(['processedAppeals', 'extraTimeSent']);
                 sendResponse({ success: true });
                 break;
@@ -1039,7 +1077,7 @@ try {
 window.omniResponderInstance = new OmniChatAutoResponder();
 
 console.log(`
-✅ OmniChat AutoResponder v5.2 loaded
+✅ OmniChat AutoResponder v5.3 loaded
 🤖 Auto-response: ${window.omniResponderInstance.autoResponseEnabled ? 'ENABLED' : 'DISABLED'}
 💡 Commands: omniResponder.help()
 `);
