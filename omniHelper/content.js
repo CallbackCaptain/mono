@@ -56,12 +56,12 @@ class OmniChatAutoResponder {
             clickDelay: 500,
             checkInterval: 2000,       // Check for new appeals every 2 seconds
             cooldownPeriod: 2 * 60 * 60 * 1000,  // 2 hours cooldown
-            templateText: 'Запрос принят в работу',
-            templateTitle: '1.1 Приветствие',
+            templateText: 'Добрый день! Мне потребуется до 5 минут, чтобы проверить информацию по вашему вопросу. Пожалуйста, не покидайте чат',
+            templateTitle: '1.1 Добрый день',
             extraTimeThreshold: 720,   // seconds on badge timer (send when ≤12 min remain)
             extraTimeMinAge: 3 * 60 * 1000, // min 3 minutes after greeting before extra-time
-            extraTimeTemplateText: 'Мне нужно немного времени для решения вашего запроса. Пожалуйста, оставайтесь в чате.',
-            extraTimeTemplateTitle: '2.2 Ожидание общее',
+            extraTimeTemplateText: 'Мне потребуется до 5 минут, чтобы всё проверить. Я вернусь с ответом. Пожалуйста, оставайтесь в чате.',
+            extraTimeTemplateTitle: '2.1 Требуется время для проверки',
             extraTimeRepeatInterval: 3 * 60 * 1000,  // repeat every 3 min while timer < threshold
             maxSendRetries: 3,         // retry a greeting this many times before giving up
             operatorIdleMs: 8000,      // treat operator as "typing" within this window after a keystroke
@@ -126,7 +126,19 @@ class OmniChatAutoResponder {
             }
 
             if (result.config) {
-                Object.assign(this.config, result.config);
+                // Template identity (titles/texts) is authoritative in code, never
+                // from storage. A stale config persisted by an older build — e.g.
+                // legacy v5.0 seeded 'Запрос принят в работу' / '1.1 Приветствие'
+                // into chrome.storage — would otherwise silently revert the current
+                // templates and break every send-once guard that keys off
+                // templateText (repeat-guard, preview check, verifyMessageSent).
+                // Only operational knobs are loaded from storage.
+                const {
+                    templateText, templateTitle,
+                    extraTimeTemplateText, extraTimeTemplateTitle,
+                    ...operational
+                } = result.config;
+                Object.assign(this.config, operational);
             }
         });
     }
@@ -502,14 +514,18 @@ class OmniChatAutoResponder {
     }
 
     async sendTemplate(appeal, templateTitle, templateText) {
-        // Last-resort loop brake: the same template never goes to the same client
-        // twice within templateRepeatGuard, no matter which detection path asked
-        // for it. The network mapping can mint a fresh id for an already-greeted
-        // chat (e.g. message ids parsed from /chat responses), and every new id
-        // passes shouldProcess — this is the one gate id churn can't get around.
-        // Slot 2+ is exempt: simultaneous appeals under one name are different
-        // chats, and slots only exist for name-based ids, which don't churn.
-        if (appeal.type !== 'extraTime' && appeal.name && (appeal.slotIndex || 1) === 1) {
+        // Last-resort loop brake for *first-time greetings*: the same greeting
+        // never goes to the same client twice within templateRepeatGuard. The
+        // network mapping can mint a fresh id for an already-greeted chat (e.g.
+        // message ids parsed from /chat responses), and every new id passes
+        // shouldProcess — this is the one gate id churn can't get around.
+        // Re-appeals and extra-time are exempt: they repeat the same template by
+        // design, and a re-appeal fires as soon as 2 min after the greeting —
+        // inside this 5-min window — so guarding it here silently dropped the
+        // re-greeting and then falsely marked the appeal processed. Slot 2+ is
+        // exempt too: simultaneous appeals under one name are different chats,
+        // and slots only exist for name-based ids, which don't churn.
+        if (!appeal.type && appeal.name && (appeal.slotIndex || 1) === 1) {
             const lastSent = this.lastTemplateSentAt.get(`${appeal.name}::${templateText}`) || 0;
             if (Date.now() - lastSent < this.config.templateRepeatGuard) {
                 console.log('⚠️ Same template sent to this client recently, skipping:', appeal.id);
@@ -534,8 +550,9 @@ class OmniChatAutoResponder {
         // The sidebar preview shows the chat's last message. If it's already this
         // template, the previous send went out (even when our chat-message selector
         // can't see it) — don't send the same text again back-to-back.
-        // Extra-time is exempt: its repeats are intentional (they reset the SLA timer).
-        if (appeal.type !== 'extraTime' && el && document.contains(el)) {
+        // Re-appeals and extra-time are exempt: their repeats are intentional
+        // (extra-time resets the SLA timer; a re-appeal re-greets a returning client).
+        if (!appeal.type && el && document.contains(el)) {
             const preview = el.textContent || '';
             if (preview.includes(templateText) || preview.includes(templateText.substring(0, 25))) {
                 console.log('⚠️ Last message in chat is already this template, skipping:', appeal.id);
@@ -623,26 +640,33 @@ class OmniChatAutoResponder {
                            targetTemplate.querySelector(SELECTORS.collapsableText) ||
                            targetTemplate;
         this.simulateClick(clickTarget);
-        // Poll for the insertion instead of a fixed 1s wait: when the app inserted
-        // the text slower than that, the blind retry below clicked the template a
-        // second time and the message went out with the text doubled.
-        let inserted = await this.waitForInputText(templateText, 2500);
+        // The OMNI app owns each template's exact wording; our config copy of it
+        // can drift (a trailing period, "…" vs "...", a non-breaking space, a line
+        // break in the contenteditable). So we must NOT gate insert-detection on an
+        // exact templateText match — when the copy differed, the match failed, the
+        // retry click below fired, and the greeting got pasted a second time on top
+        // of the first: a garbled, doubled message that still went out. The field
+        // was verified empty above, so detect insertion by it going non-empty, and
+        // only retry while it's still genuinely empty.
+        let inserted = await this.waitForInputNonEmpty(2500);
 
-        // If template text didn't appear, try clicking the outer container
-        if (!inserted) {
+        if (!inserted && !this.getInputText().trim()) {
             console.log('📋 Retrying click on template container');
             this.simulateClick(targetTemplate);
-            inserted = await this.waitForInputText(templateText, 2500);
+            inserted = await this.waitForInputNonEmpty(2500);
         }
 
-        // Verify template was inserted into input (remember it for the send check below)
         const inputText = this.getInputText();
-        const wasInserted = inputText.includes(templateText);
+        const wasInserted = inserted;
         console.log('📋 Input after template click:', inputText.substring(0, 60) || '(empty)');
 
-        // Last line of defence: if the text still ended up in the input twice,
-        // clear it and retry from scratch rather than send a doubled message.
-        if (inputText.split(templateText).length - 1 > 1) {
+        // Last line of defence against a doubled paste (e.g. a first insert slower
+        // than the wait that the retry then duplicated): clear and retry from a clean
+        // state rather than send it. Catch the exact-match double, and — when our
+        // copy drifted from the real wording — a field grown to ~twice the template.
+        const exactDoubled = inputText.split(templateText).length - 1 > 1;
+        const lengthDoubled = inputText.length > templateText.length * 1.8;
+        if (exactDoubled || lengthDoubled) {
             this.clearInput();
             throw new Error('Template inserted twice — cleared input');
         }
@@ -675,7 +699,7 @@ class OmniChatAutoResponder {
             for (const msg of messages) {
                 if (msg.textContent?.includes(templateText)) return true;
             }
-            if (wasInserted && !this.getInputText().includes(templateText)) return true;
+            if (wasInserted && !this.getInputText().trim()) return true;
             await this.wait(200);
         }
         return false;
@@ -818,10 +842,12 @@ class OmniChatAutoResponder {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    async waitForInputText(text, timeout = 2500) {
+    // Detect that the app inserted *something* into the (previously empty) compose
+    // field, without depending on the exact template wording — see sendTemplate.
+    async waitForInputNonEmpty(timeout = 2500) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
-            if (this.getInputText().includes(text)) return true;
+            if (this.getInputText().trim()) return true;
             await this.wait(200);
         }
         return false;

@@ -291,7 +291,7 @@
       <p>Chrome-расширение (Manifest V3), которое автоматически отвечает на входящие обращения в веб-интерфейсе <strong>OmniChat РТ</strong> (<code>omnichat.rt.ru</code>). Оно работает поверх чужого SPA-интерфейса оператора: само находит новые обращения в боковой панели, открывает их, вставляет шаблон ответа и нажимает «Отправить» — без участия человека.</p>
       <p>Две основные функции:</p>
       <ol>
-        <li><strong>Приветствие</strong> — на каждое новое обращение отправляется шаблон «Запрос принят в работу».</li>
+        <li><strong>Приветствие</strong> — на каждое новое обращение отправляется шаблон «1.1 Добрый день» («Добрый день! Мне потребуется до 5 минут…»).</li>
         <li><strong>Запрос дополнительного времени</strong> — когда таймер обращения подходит к концу, клиенту автоматически отправляется сообщение с просьбой подождать (чтобы обращение не «протухло» по SLA-таймеру).</li>
       </ol>
       <p>Поскольку API OmniChat недоступно напрямую, расширение действует как <strong>робот в браузере</strong>: эмулирует клики мышью по DOM-элементам реального интерфейса.</p>
@@ -427,7 +427,7 @@
         <li>пропуск, если доп. время уже в очереди для этого обращения;</li>
         <li><strong>интервал повтора</strong> <code>extraTimeRepeatInterval</code> (3 мин): нельзя слать чаще.</li>
       </ul>
-      <p>Если условия выполнены — в очередь добавляется задача <code>type: 'extraTime'</code> с шаблоном «2.2 Ожидание общее» («Мне нужно немного времени…»). Время последней отправки пишется в <code>extraTimeSent</code> (<code>Map&lt;appealId, ts&gt;</code>, сохраняется в storage).</p>
+      <p>Если условия выполнены — в очередь добавляется задача <code>type: 'extraTime'</code> с шаблоном «2.1 Требуется время для проверки» («Мне потребуется до 5 минут…»). Время последней отправки пишется в <code>extraTimeSent</code> (<code>Map&lt;appealId, ts&gt;</code>, сохраняется в storage).</p>
       <div class="callout note"><div class="ic">💡</div><div><p>Доп. время проверяется даже когда очередь занята (см. <code>startPeriodicCheck</code>).</p></div></div>
     </section>
 
@@ -460,12 +460,12 @@
             <tr><td><code>clickDelay</code></td><td>500 мс</td><td>Пауза после кликов</td></tr>
             <tr><td><code>checkInterval</code></td><td>2000 мс</td><td>Период опроса обращений</td></tr>
             <tr><td><code>cooldownPeriod</code></td><td>2 ч</td><td>Срок жизни записи об обработанном обращении</td></tr>
-            <tr><td><code>templateText</code></td><td>«Запрос принят в работу»</td><td>Текст приветствия</td></tr>
-            <tr><td><code>templateTitle</code></td><td>«1.1 Приветствие»</td><td>Заголовок шаблона приветствия</td></tr>
+            <tr><td><code>templateText</code></td><td>«Добрый день! Мне потребуется до 5 минут…»</td><td>Текст приветствия</td></tr>
+            <tr><td><code>templateTitle</code></td><td>«1.1 Добрый день»</td><td>Заголовок шаблона приветствия</td></tr>
             <tr><td><code>extraTimeThreshold</code></td><td>720 сек</td><td>Слать доп. время, когда таймер ≤ 12 мин</td></tr>
             <tr><td><code>extraTimeMinAge</code></td><td>3 мин</td><td>Минимум после приветствия до доп. времени</td></tr>
-            <tr><td><code>extraTimeTemplateText</code></td><td>«Мне нужно немного времени…»</td><td>Текст доп. времени</td></tr>
-            <tr><td><code>extraTimeTemplateTitle</code></td><td>«2.2 Ожидание общее»</td><td>Заголовок шаблона доп. времени</td></tr>
+            <tr><td><code>extraTimeTemplateText</code></td><td>«Мне потребуется до 5 минут…»</td><td>Текст доп. времени</td></tr>
+            <tr><td><code>extraTimeTemplateTitle</code></td><td>«2.1 Требуется время для проверки»</td><td>Заголовок шаблона доп. времени</td></tr>
             <tr><td><code>extraTimeRepeatInterval</code></td><td>3 мин</td><td>Частота повтора доп. времени</td></tr>
             <tr><td><code>maxSendRetries</code></td><td>3</td><td>Сколько раз повторять отправку приветствия до «сдаюсь»</td></tr>
             <tr><td><code>operatorIdleMs</code></td><td>8000 мс</td><td>Окно «оператор печатает» после последнего настоящего нажатия — в нём <code>flushCurrentInput</code> не отправляет текст</td></tr>
